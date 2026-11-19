@@ -1,0 +1,48 @@
+name: Build PulseDrop v3 Android APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    name: Build Release APK with Custom Logo
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Generate Android Platform Files (Personal Package ID)
+        run: |
+          flutter create --platforms=android --org com.mohamedsaeed --project-name pulsedrop .
+          cp config/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
+
+      - name: Install Dependencies
+        run: flutter pub get
+
+      - name: Generate Custom PulseDrop App Icons
+        run: dart run flutter_launcher_icons
+
+      - name: Build Release APK
+        run: flutter build apk --release --no-tree-shake-icons
+
+      - name: Upload PulseDrop v3 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: PulseDrop-v3-APK
+          path: build/app/outputs/flutter-apk/app-release.apk
+          retention-days: 30
