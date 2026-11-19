@@ -30,6 +30,31 @@ jobs:
         run: |
           flutter create --platforms=android --org com.mohamedsaeed --project-name pulsedrop .
           cp config/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
+          if [ -f android/build.gradle.kts ]; then
+            cat << 'EOF' >> android/build.gradle.kts
+
+          subprojects {
+              plugins.withId("com.android.library") {
+                  extensions.findByName("android")?.let { ext ->
+                      try {
+                          ext.javaClass.getMethod("compileSdkVersion", Int::class.javaPrimitiveType).invoke(ext, 36)
+                      } catch (_: Exception) {}
+                  }
+              }
+          }
+          EOF
+          elif [ -f android/build.gradle ]; then
+            cat << 'EOF' >> android/build.gradle
+
+          subprojects {
+              plugins.withId("com.android.library") {
+                  android {
+                      compileSdkVersion 36
+                  }
+              }
+          }
+          EOF
+          fi
 
       - name: Install Dependencies
         run: flutter pub get
