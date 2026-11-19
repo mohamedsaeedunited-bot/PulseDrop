@@ -38,7 +38,7 @@ class _WebShareSheetState extends State<WebShareSheet> {
   String get _wifiQrData => 'WIFI:T:WPA;S:${_ssidCtrl.text};P:${_passCtrl.text};;';
 
   Future<void> _pickFilesForWeb() async {
-    final result = await FilePicker.platform.pickFiles(allowMultiple: true);
+    final result = await FilePicker.pickFiles(allowMultiple: true);
     if (result == null) return;
     final items = <SharedFileItem>[];
     for (final f in result.files) {
