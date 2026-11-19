@@ -80,7 +80,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _pickAndSendToPeers(List<PeerDevice> targets) async {
-    final result = await FilePicker.platform.pickFiles(allowMultiple: true);
+    final result = await FilePicker.pickFiles(allowMultiple: true);
     if (result == null) return;
     for (final peer in targets) {
       for (final pf in result.files) {
