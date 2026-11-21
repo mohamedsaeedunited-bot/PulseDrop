@@ -29,9 +29,10 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+
 flutter_launcher_icons:
   android: true
   ios: false
- image_path: "assets/icon/pulsedrop_icon.png"
+  image_path: "assets/icon/pulsedrop_icon.png"
   adaptive_icon_background: "#0F172A"
   adaptive_icon_foreground: "assets/icon/pulsedrop_foreground.png"
