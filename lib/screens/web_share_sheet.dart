@@ -1,25 +1,19 @@
+import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:qr_flutter/qr_flutter.dart';
-import '../l10n/app_strings.dart';
-import '../models/models.dart';
-import '../services/transfer_engine.dart';
-import '../theme/app_theme.dart';
+import '../services/network_service.dart';
 
 class WebShareSheet extends StatefulWidget {
-  final String? localIp;
-  final TransferEngine engine;
-  final AppStrings strings;
-  final ValueChanged<String> onScannedIp;
+  final NetworkService networkService;
+  final Function(String ip) onQrIpScanned;
 
   const WebShareSheet({
     super.key,
-    required this.localIp,
-    required this.engine,
-    required this.strings,
-    required this.onScannedIp,
+    required this.networkService,
+    required this.onQrIpScanned,
   });
 
   @override
@@ -27,266 +21,243 @@ class WebShareSheet extends StatefulWidget {
 }
 
 class _WebShareSheetState extends State<WebShareSheet> {
-  int _tab = 0;
-  bool _handledScan = false;
-  final TextEditingController _ssidCtrl = TextEditingController(text: 'PulseDrop_Hotspot');
-  final TextEditingController _passCtrl = TextEditingController(text: '12345678');
-
-  String get _webUrl =>
-      widget.localIp != null ? 'http://${widget.localIp}:${TransferEngine.serverPort}' : '';
-
-  String get _wifiQrData => 'WIFI:T:WPA;S:${_ssidCtrl.text};P:${_passCtrl.text};;';
-
-  Future<void> _pickFilesForWeb() async {
-    final result = await FilePicker.platform.pickFiles(allowMultiple: true);
-    if (result == null) return;
-    final items = <SharedFileItem>[];
-    for (final f in result.files) {
-      if (f.path != null) {
-        items.add(SharedFileItem(
-          id: '${DateTime.now().microsecondsSinceEpoch}_${items.length}',
-          name: f.name,
-          path: f.path!,
-          size: f.size,
-        ));
-      }
-    }
-    widget.engine.addWebSharedFiles(items);
-    if (mounted) setState(() {});
-  }
+  int _selectedTab = 0; // 0: Web Portal, 1: QR Scan, 2: Hotspot QR
+  bool _cameraGranted = false;
+  bool _checkingCamera = false;
+  MobileScannerController? _scannerController;
 
   @override
   void dispose() {
-    _ssidCtrl.dispose();
-    _passCtrl.dispose();
+    _scannerController?.dispose();
     super.dispose();
+  }
+
+  Future<void> _initCamera() async {
+    setState(() => _checkingCamera = true);
+    final status = await Permission.camera.request();
+    if (status.isGranted) {
+      _scannerController?.dispose();
+      _scannerController = MobileScannerController(
+        detectionSpeed: DetectionSpeed.noDuplicates,
+      );
+      setState(() {
+        _cameraGranted = true;
+        _checkingCamera = false;
+      });
+    } else {
+      setState(() {
+        _cameraGranted = false;
+        _checkingCamera = false;
+      });
+    }
+  }
+
+  Future<void> _pickWebFiles() async {
+    final result = await FilePicker.platform.pickFiles(allowMultiple: true);
+    if (result != null) {
+      setState(() {
+        for (final f in result.files) {
+          if (f.path != null) {
+            widget.networkService.sharedWebFiles.add(File(f.path!));
+          }
+        }
+      });
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    final s = widget.strings;
-    return DraggableScrollableSheet(
-      initialChildSize: 0.88,
-      maxChildSize: 0.95,
-      minChildSize: 0.55,
-      expand: false,
-      builder: (_, scrollController) {
-        return Padding(
-          padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
-          child: Column(
-            children: [
-              Container(
-                width: 44,
-                height: 5,
-                decoration: BoxDecoration(
-                  color: Colors.grey.withAlpha(90),
-                  borderRadius: BorderRadius.circular(10),
-                ),
+    final ip = widget.networkService.localIp ?? 'غير متصل بالواي فاي';
+    final webUrl = 'http://$ip:${NetworkService.serverPort}';
+
+    return SafeArea(
+      top: false,
+      child: Container(
+        height: MediaQuery.of(context).size.height * 0.78,
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
+        decoration: BoxDecoration(
+          color: Theme.of(context).scaffoldBackgroundColor,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        child: Column(
+          children: [
+            Container(
+              width: 44,
+              height: 4,
+              decoration: BoxDecoration(
+                color: Colors.grey.shade400,
+                borderRadius: BorderRadius.circular(2),
               ),
-              const SizedBox(height: 14),
-              SegmentedButton<int>(
-                segments: [
-                  ButtonSegment(value: 0, label: Text(s.showQrTab)),
-                  ButtonSegment(value: 1, label: Text(s.scanQrTab)),
-                  ButtonSegment(value: 2, label: Text(s.hotspotTab)),
-                ],
-                selected: {_tab},
-                onSelectionChanged: (val) => setState(() {
-                  _tab = val.first;
-                  _handledScan = false;
-                }),
-              ),
-              const SizedBox(height: 16),
-              Expanded(
-                child: _tab == 0
-                    ? _buildMyQrView(scrollController, s)
-                    : _tab == 1
-                        ? _buildScannerView()
-                        : _buildHotspotQrView(scrollController, s),
-              ),
-            ],
-          ),
-        );
-      },
+            ),
+            const SizedBox(height: 16),
+            SegmentedButton<int>(
+              segments: const [
+                ButtonSegment(value: 0, label: Text('بوابة الويب')),
+                ButtonSegment(value: 1, label: Text('مسح QR')),
+                ButtonSegment(value: 2, label: Text('هوتسبوت QR')),
+              ],
+              selected: {_selectedTab},
+              onSelectionChanged: (val) {
+                final next = val.first;
+                setState(() => _selectedTab = next);
+                if (next == 1) {
+                  _initCamera();
+                } else {
+                  _scannerController?.stop();
+                }
+              },
+            ),
+            const SizedBox(height: 20),
+            Expanded(
+              child: _selectedTab == 0
+                  ? _buildWebPortalTab(webUrl)
+                  : _selectedTab == 1
+                      ? _buildQrScannerTab()
+                      : _buildHotspotTab(webUrl),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
-  Widget _buildMyQrView(ScrollController controller, AppStrings s) {
-    return ListView(
-      controller: controller,
-      children: [
-        Text(
-          s.webShareTitle,
-          textAlign: TextAlign.center,
-          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
-        ),
-        const SizedBox(height: 6),
-        Text(
-          s.webShareDesc,
-          textAlign: TextAlign.center,
-          style: const TextStyle(fontSize: 13, color: AppColors.lightSubtext),
-        ),
-        const SizedBox(height: 16),
-        if (widget.engine.pinEnabled)
-          Center(
-            child: Container(
-              margin: const EdgeInsets.only(bottom: 12),
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              decoration: BoxDecoration(
-                color: AppColors.warning.withAlpha(30),
-                borderRadius: BorderRadius.circular(14),
-              ),
-              child: Text(
-                'PIN: ${widget.engine.webPin}',
-                style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 16, color: AppColors.warning),
-              ),
+  Widget _buildWebPortalTab(String webUrl) {
+    return SingleChildScrollView(
+      child: Column(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(16),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.05),
+                  blurRadius: 10,
+                ),
+              ],
+            ),
+            child: QrImageView(
+              data: webUrl,
+              size: 190,
             ),
           ),
-        if (_webUrl.isNotEmpty) ...[
-          Center(
-            child: Container(
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(24),
-              ),
-              child: QrImageView(
-                data: _webUrl,
-                version: QrVersions.auto,
-                size: 200,
-                eyeStyle: const QrEyeStyle(eyeShape: QrEyeShape.circle, color: AppColors.primary),
-                dataModuleStyle: const QrDataModuleStyle(
-                  dataModuleShape: QrDataModuleShape.circle,
-                  color: Color(0xFF0F172A),
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(height: 12),
-          Center(
-            child: InkWell(
-              onTap: () {
-                Clipboard.setData(ClipboardData(text: _webUrl));
-                ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(s.copied)));
-              },
-              borderRadius: BorderRadius.circular(14),
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                decoration: BoxDecoration(
-                  color: AppColors.primary.withAlpha(22),
-                  borderRadius: BorderRadius.circular(14),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(_webUrl, style: const TextStyle(fontWeight: FontWeight.w700, color: AppColors.primary)),
-                    const SizedBox(width: 8),
-                    const Icon(Icons.copy_rounded, size: 16, color: AppColors.primary),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ] else
-          Center(child: Padding(padding: const EdgeInsets.all(20), child: Text(s.connectSameWifi))),
-        const SizedBox(height: 18),
-        ElevatedButton.icon(
-          onPressed: _pickFilesForWeb,
-          icon: const Icon(Icons.add_circle_outline_rounded),
-          label: Text(s.addFilesForWeb),
-          style: ElevatedButton.styleFrom(
-            backgroundColor: AppColors.primary,
-            foregroundColor: Colors.white,
-            padding: const EdgeInsets.symmetric(vertical: 14),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          ),
-        ),
-        if (widget.engine.webSharedFiles.isNotEmpty) ...[
           const SizedBox(height: 14),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text('${s.sharedFilesCount} ${widget.engine.webSharedFiles.length}',
-                  style: const TextStyle(fontWeight: FontWeight.w700)),
-              TextButton(
-                onPressed: () {
-                  widget.engine.clearWebSharedFiles();
-                  setState(() {});
-                },
-                child: Text(s.clearList),
-              ),
-            ],
+          SelectableText(
+            webUrl,
+            style: const TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.bold,
+              color: Color(0xFF0284C7),
+            ),
           ),
-          ...widget.engine.webSharedFiles.map(
-            (f) => ListTile(
-              dense: true,
-              leading: Icon(
-                f.isVideo ? Icons.play_circle_fill_rounded : Icons.insert_drive_file_rounded,
-                color: AppColors.accent,
-              ),
-              title: Text(f.name, maxLines: 1, overflow: TextOverflow.ellipsis),
-              subtitle: Text(formatBytes(f.size)),
+          const SizedBox(height: 6),
+          const Text(
+            'افتح الرابط من متصفح الكمبيوتر أو امسح الكود لتحميل وإرسال الملفات',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.grey),
+          ),
+          const SizedBox(height: 16),
+          FilledButton.icon(
+            onPressed: _pickWebFiles,
+            icon: const Icon(Icons.add_circle_outline),
+            label: Text(
+              'اختيار ملفات للمشاركة (${widget.networkService.sharedWebFiles.length})',
             ),
           ),
         ],
-      ],
+      ),
     );
   }
 
-  Widget _buildHotspotQrView(ScrollController controller, AppStrings s) {
-    return ListView(
-      controller: controller,
-      children: [
-        Text(s.hotspotHint, textAlign: TextAlign.center, style: const TextStyle(fontSize: 13)),
-        const SizedBox(height: 14),
-        TextField(
-          controller: _ssidCtrl,
-          decoration: InputDecoration(labelText: s.hotspotName, border: const OutlineInputBorder()),
-          onChanged: (_) => setState(() {}),
-        ),
-        const SizedBox(height: 12),
-        TextField(
-          controller: _passCtrl,
-          decoration: InputDecoration(labelText: s.hotspotPass, border: const OutlineInputBorder()),
-          onChanged: (_) => setState(() {}),
-        ),
-        const SizedBox(height: 20),
-        Center(
-          child: Container(
-            padding: const EdgeInsets.all(14),
-            decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(24)),
-            child: QrImageView(
-              data: _wifiQrData,
-              version: QrVersions.auto,
-              size: 200,
-              eyeStyle: const QrEyeStyle(eyeShape: QrEyeShape.circle, color: AppColors.accent),
+  Widget _buildQrScannerTab() {
+    if (_checkingCamera) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (!_cameraGranted || _scannerController == null) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.camera_alt_outlined, size: 56, color: Colors.grey),
+            const SizedBox(height: 12),
+            const Text('يلزم السماح بإذن الكاميرا لمسح رمز QR'),
+            const SizedBox(height: 12),
+            FilledButton(
+              onPressed: _initCamera,
+              child: const Text('تفعيل الكاميرا'),
             ),
-          ),
+          ],
         ),
-      ],
-    );
-  }
+      );
+    }
 
-  Widget _buildScannerView() {
     return ClipRRect(
-      borderRadius: BorderRadius.circular(24),
+      borderRadius: BorderRadius.circular(20),
       child: MobileScanner(
-        onDetect: (BarcodeCapture capture) {
-          if (_handledScan) return;
+        controller: _scannerController!,
+        errorBuilder: (context, error, child) {
+          return Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.error_outline, color: Colors.red, size: 48),
+                const SizedBox(height: 8),
+                const Text('تعذر تشغيل الكاميرا، حاول مرة أخرى'),
+                const SizedBox(height: 12),
+                FilledButton(
+                  onPressed: _initCamera,
+                  child: const Text('إعادة المحاولة'),
+                ),
+              ],
+            ),
+          );
+        },
+        onDetect: (capture) {
           for (final barcode in capture.barcodes) {
             final raw = barcode.rawValue;
-            if (raw != null && raw.startsWith('http://')) {
-              final uri = Uri.tryParse(raw);
-              if (uri != null && uri.host.isNotEmpty) {
-                _handledScan = true;
-                Navigator.pop(context);
-                widget.onScannedIp(uri.host);
-                break;
-              }
+            if (raw != null && raw.isNotEmpty) {
+              _scannerController?.stop();
+              Navigator.pop(context);
+              final cleaned = raw
+                  .replaceAll('http://', '')
+                  .replaceAll('https://', '')
+                  .split(':')
+                  .first;
+              widget.onQrIpScanned(cleaned);
+              break;
             }
           }
         },
       ),
+    );
+  }
+
+  Widget _buildHotspotTab(String webUrl) {
+    return Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        const Icon(Icons.wifi_tethering, size: 64, color: Color(0xFF0284C7)),
+        const SizedBox(height: 16),
+        const Text(
+          'النقل بدون راوتر (هوتسبوت)',
+          style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 8),
+        const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 20),
+          child: Text(
+            'افتح نقطة الاتصال (Hotspot) من موبايلك، ووصّل الموبايل التاني عليها، واضغط "إرسال" وهيكتشفه تلقائياً بدون سحب من الباقة.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.grey),
+          ),
+        ),
+        const SizedBox(height: 16),
+        Text(
+          'عنوان جهازك الحالي: $webUrl',
+          style: const TextStyle(fontWeight: FontWeight.w600),
+        ),
+      ],
     );
   }
 }

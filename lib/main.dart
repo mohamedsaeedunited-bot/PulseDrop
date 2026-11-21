@@ -1,10 +1,15 @@
 import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter/services.dart';
 import 'screens/home_screen.dart';
-import 'theme/app_theme.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  SystemChrome.setSystemUIOverlayStyle(
+    const SystemUiOverlayStyle(
+      statusBarColor: Colors.transparent,
+      systemNavigationBarColor: Colors.transparent,
+    ),
+  );
   runApp(const PulseDropApp());
 }
 
@@ -16,33 +21,12 @@ class PulseDropApp extends StatefulWidget {
 }
 
 class _PulseDropAppState extends State<PulseDropApp> {
-  bool _isDark = false;
-  bool _isArabic = true;
+  ThemeMode _themeMode = ThemeMode.light;
 
-  @override
-  void initState() {
-    super.initState();
-    _loadPrefs();
-  }
-
-  Future<void> _loadPrefs() async {
-    final prefs = await SharedPreferences.getInstance();
+  void _toggleTheme() {
     setState(() {
-      _isDark = prefs.getBool('is_dark') ?? false;
-      _isArabic = prefs.getBool('is_arabic') ?? true;
+      _themeMode = _themeMode == ThemeMode.light ? ThemeMode.dark : ThemeMode.light;
     });
-  }
-
-  Future<void> _toggleTheme() async {
-    final prefs = await SharedPreferences.getInstance();
-    setState(() => _isDark = !_isDark);
-    await prefs.setBool('is_dark', _isDark);
-  }
-
-  Future<void> _toggleLanguage() async {
-    final prefs = await SharedPreferences.getInstance();
-    setState(() => _isArabic = !_isArabic);
-    await prefs.setBool('is_arabic', _isArabic);
   }
 
   @override
@@ -50,20 +34,32 @@ class _PulseDropAppState extends State<PulseDropApp> {
     return MaterialApp(
       title: 'PulseDrop',
       debugShowCheckedModeBanner: false,
-      theme: AppTheme.light(),
-      darkTheme: AppTheme.dark(),
-      themeMode: _isDark ? ThemeMode.dark : ThemeMode.light,
+      themeMode: _themeMode,
+      theme: ThemeData(
+        useMaterial3: true,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF0EA5E9),
+          brightness: Brightness.light,
+        ),
+        scaffoldBackgroundColor: const Color(0xFFF8FAFC),
+      ),
+      darkTheme: ThemeData(
+        useMaterial3: true,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF0EA5E9),
+          brightness: Brightness.dark,
+        ),
+        scaffoldBackgroundColor: const Color(0xFF0F172A),
+      ),
       builder: (context, child) {
         return Directionality(
-          textDirection: _isArabic ? TextDirection.rtl : TextDirection.ltr,
-          child: child!,
+          textDirection: TextDirection.rtl,
+          child: child ?? const SizedBox.shrink(),
         );
       },
       home: HomeScreen(
-        isDark: _isDark,
-        isArabic: _isArabic,
         onToggleTheme: _toggleTheme,
-        onToggleLanguage: _toggleLanguage,
+        isDarkMode: _themeMode == ThemeMode.dark,
       ),
     );
   }
