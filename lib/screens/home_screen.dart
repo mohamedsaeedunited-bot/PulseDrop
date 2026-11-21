@@ -220,8 +220,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                   child: _wifiDevices.isEmpty
                                       ? const Center(
                                           child: Text(
-                                            'لا توجد أجهزة PulseDrop على نفس الشبكة حالياً.
-تأكد أن الجهازين على نفس الواي فاي أو الهوتسبوت.',
+                                           'لا توجد أجهزة PulseDrop على نفس الشبكة حالياً.\nتأكد أن الجهازين على نفس الواي فاي أو الهوتسبوت.',
                                             textAlign: TextAlign.center,
                                             style: TextStyle(color: Colors.grey),
                                           ),
@@ -294,8 +293,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                   child: btDevices.isEmpty
                                       ? const Center(
                                           child: Text(
-                                            'جاري البحث عن أجهزة البلوتوث القريبة...
-تأكد من تفعيل البلوتوث والموقع.',
+                                            'جاري البحث عن أجهزة البلوتوث القريبة...\nتأكد من تفعيل البلوتوث والموقع.',
                                             textAlign: TextAlign.center,
                                             style: TextStyle(color: Colors.grey),
                                           ),
