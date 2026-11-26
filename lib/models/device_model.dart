@@ -3,13 +3,15 @@ class NetworkDevice {
   final String ip;
   final int port;
   final String version;
+  final DateTime lastSeen;
 
   NetworkDevice({
     required this.name,
     required this.ip,
     this.port = 8080,
-    this.version = '4.0',
-  });
+    this.version = '5.0',
+    DateTime? lastSeen,
+  }) : lastSeen = lastSeen ?? DateTime.now();
 
   @override
   bool operator ==(Object other) =>
@@ -30,6 +32,46 @@ class BluetoothDeviceItem {
     required this.name,
     required this.rssi,
   });
+
+  String get signalLabel {
+    if (rssi >= -60) return 'قريب جداً • إشارة ممتازة';
+    if (rssi >= -75) return 'قريب • إشارة جيدة';
+    return 'متوسط المسافة';
+  }
+}
+
+class TransferProgress {
+  final String fileName;
+  final String? filePath;
+  final String peerName;
+  final bool isSending;
+  final int bytesTransferred;
+  final int totalBytes;
+  final double speedBytesPerSec;
+  final int remainingSeconds;
+  final bool isCompleted;
+  final bool isFailed;
+
+  TransferProgress({
+    required this.fileName,
+    this.filePath,
+    required this.peerName,
+    required this.isSending,
+    required this.bytesTransferred,
+    required this.totalBytes,
+    required this.speedBytesPerSec,
+    required this.remainingSeconds,
+    this.isCompleted = false,
+    this.isFailed = false,
+  });
+
+  double get progress {
+    if (isCompleted) return 1.0;
+    if (totalBytes <= 0) return 0.0;
+    return (bytesTransferred / totalBytes).clamp(0.0, 1.0);
+  }
+
+  int get percentage => (progress * 100).round();
 }
 
 class TransferRecord {
@@ -48,6 +90,24 @@ class TransferRecord {
     required this.timestamp,
     this.sizeBytes = 0,
   });
+
+  Map<String, dynamic> toJson() => {
+        'fileName': fileName,
+        'filePath': filePath,
+        'peerName': peerName,
+        'isSent': isSent,
+        'timestamp': timestamp.toIso8601String(),
+        'sizeBytes': sizeBytes,
+      };
+
+  factory TransferRecord.fromJson(Map<String, dynamic> json) => TransferRecord(
+        fileName: json['fileName'] ?? 'ملف',
+        filePath: json['filePath'],
+        peerName: json['peerName'] ?? 'جهاز قريب',
+        isSent: json['isSent'] ?? true,
+        timestamp: DateTime.tryParse(json['timestamp'] ?? '') ?? DateTime.now(),
+        sizeBytes: json['sizeBytes'] ?? 0,
+      );
 }
 
 class ChatMessage {

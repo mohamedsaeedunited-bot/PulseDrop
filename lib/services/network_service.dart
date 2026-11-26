@@ -1,19 +1,32 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'package:http/http.dart' as http;
+import 'package:flutter/foundation.dart';
 import 'package:network_info_plus/network_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../models/device_model.dart';
 
 class NetworkService {
   static const int serverPort = 8080;
+  static const int udpDiscoveryPort = 8081;
+
   HttpServer? _server;
+  RawDatagramSocket? _udpSocket;
+  Timer? _beaconTimer;
+
   String deviceName = 'PulseDrop Phone';
   String? localIp;
   bool isVisible = true;
 
   final List<File> sharedWebFiles = [];
+
+  final ValueNotifier<List<NetworkDevice>> discoveredDevices =
+      ValueNotifier<List<NetworkDevice>>([]);
+  final ValueNotifier<bool> isScanning = ValueNotifier<bool>(false);
+  final ValueNotifier<TransferProgress?> activeTransfer =
+      ValueNotifier<TransferProgress?>(null);
+
   final StreamController<TransferRecord> _transferController =
       StreamController<TransferRecord>.broadcast();
   final StreamController<ChatMessage> _chatController =
@@ -21,6 +34,28 @@ class NetworkService {
 
   Stream<TransferRecord> get onTransfer => _transferController.stream;
   Stream<ChatMessage> get onChat => _chatController.stream;
+
+  Future<void> loadDeviceName() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final saved = prefs.getString('pulsedrop_device_name');
+      if (saved != null && saved.trim().isNotEmpty) {
+        deviceName = saved.trim();
+      } else {
+        deviceName = 'PulseDrop (${Platform.localHostname})';
+      }
+    } catch (_) {}
+  }
+
+  Future<void> saveDeviceName(String newName) async {
+    if (newName.trim().isEmpty) return;
+    deviceName = newName.trim();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('pulsedrop_device_name', deviceName);
+    } catch (_) {}
+    sendUdpBeacon();
+  }
 
   Future<String?> getLocalIpAddress() async {
     try {
@@ -49,18 +84,183 @@ class NetworkService {
     return localIp;
   }
 
-  Future<void> startServer() async {
-    if (_server != null) return;
+  Future<void> startServices() async {
+    await loadDeviceName();
     await getLocalIpAddress();
+    await _startHttpServer();
+    await _startUdpDiscovery();
+    startAutoDiscovery();
+  }
+
+  Future<void> stopServices() async {
+    _beaconTimer?.cancel();
+    _udpSocket?.close();
+    _udpSocket = null;
+    await _server?.close(force: true);
+    _server = null;
+  }
+
+  Future<void> _startHttpServer() async {
+    if (_server != null) return;
     try {
-      _server = await HttpServer.bind(InternetAddress.anyIPv4, serverPort, shared: true);
+      _server = await HttpServer.bind(
+        InternetAddress.anyIPv4,
+        serverPort,
+        shared: true,
+      );
       _server!.listen(_handleRequest);
     } catch (_) {}
   }
 
-  Future<void> stopServer() async {
-    await _server?.close(force: true);
-    _server = null;
+  Future<void> _startUdpDiscovery() async {
+    if (_udpSocket != null) return;
+    try {
+      _udpSocket = await RawDatagramSocket.bind(
+        InternetAddress.anyIPv4,
+        udpDiscoveryPort,
+        reuseAddress: true,
+        reusePort: true,
+      );
+      _udpSocket!.broadcastEnabled = true;
+      _udpSocket!.listen((event) {
+        if (event == RawSocketEvent.read) {
+          final dg = _udpSocket!.receive();
+          if (dg == null) return;
+          try {
+            final msg = utf8.decode(dg.data);
+            final data = jsonDecode(msg);
+            if (data['app'] == 'PulseDrop') {
+              final senderIp = dg.address.address;
+              if (senderIp != localIp && senderIp != '127.0.0.1') {
+                _registerDiscoveredDevice(
+                  NetworkDevice(
+                    name: data['name'] ?? 'PulseDrop Device',
+                    ip: senderIp,
+                    port: data['port'] ?? serverPort,
+                    version: data['version'] ?? '5.0',
+                  ),
+                );
+                if (data['type'] == 'DISCOVER' && isVisible) {
+                  _sendUdpPacket(dg.address, 'REPLY');
+                }
+              }
+            }
+          } catch (_) {}
+        }
+      });
+
+      _beaconTimer?.cancel();
+      _beaconTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+        if (isVisible) sendUdpBeacon();
+      });
+    } catch (_) {}
+  }
+
+  void _sendUdpPacket(InternetAddress target, String type) {
+    if (_udpSocket == null || !isVisible) return;
+    try {
+      final payload = utf8.encode(jsonEncode({
+        'app': 'PulseDrop',
+        'type': type,
+        'name': deviceName,
+        'port': serverPort,
+        'version': '5.0',
+      }));
+      _udpSocket!.send(payload, target, udpDiscoveryPort);
+    } catch (_) {}
+  }
+
+  void sendUdpBeacon() {
+    _sendUdpPacket(InternetAddress('255.255.255.255'), 'DISCOVER');
+    if (localIp != null && localIp!.contains('.')) {
+      final parts = localIp!.split('.');
+      if (parts.length == 4) {
+        final subnetBroadcast = '${parts[0]}.${parts[1]}.${parts[2]}.255';
+        try {
+          _sendUdpPacket(InternetAddress(subnetBroadcast), 'DISCOVER');
+        } catch (_) {}
+      }
+    }
+  }
+
+  void _registerDiscoveredDevice(NetworkDevice device) {
+    final current = List<NetworkDevice>.from(discoveredDevices.value);
+    final idx = current.indexWhere((d) => d.ip == device.ip);
+    if (idx >= 0) {
+      current[idx] = device;
+    } else {
+      current.add(device);
+    }
+    discoveredDevices.value = current;
+  }
+
+  Future<void> startAutoDiscovery() async {
+    await getLocalIpAddress();
+    sendUdpBeacon();
+
+    if (isScanning.value) return;
+    isScanning.value = true;
+
+    try {
+      final candidates = <String>{
+        '192.168.43.1',
+        '192.168.137.1',
+        '172.20.10.1',
+        '192.168.1.1',
+        '192.168.0.1',
+      };
+
+      if (localIp != null && localIp!.contains('.')) {
+        final parts = localIp!.split('.');
+        if (parts.length == 4) {
+          final subnet = '${parts[0]}.${parts[1]}.${parts[2]}';
+          for (int i = 1; i <= 254; i++) {
+            candidates.add('$subnet.$i');
+          }
+        }
+      }
+
+      if (localIp != null) {
+        candidates.remove(localIp);
+      }
+
+      final list = candidates.toList();
+      const batchSize = 40;
+      for (int start = 0; start < list.length; start += batchSize) {
+        final batch = list.skip(start).take(batchSize);
+        await Future.wait(batch.map((ip) => _probeDeviceHttp(ip)));
+      }
+    } finally {
+      isScanning.value = false;
+    }
+  }
+
+  Future<void> _probeDeviceHttp(String targetIp) async {
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(milliseconds: 450);
+    try {
+      final request = await client
+          .getUrl(Uri.parse('http://$targetIp:$serverPort/ping'))
+          .timeout(const Duration(milliseconds: 500));
+      final response = await request.close().timeout(const Duration(milliseconds: 500));
+      if (response.statusCode == 200) {
+        final body = await utf8.decoder.bind(response).join();
+        final data = jsonDecode(body);
+        if (data['app'] == 'PulseDrop') {
+          _registerDiscoveredDevice(
+            NetworkDevice(
+              name: data['name'] ?? 'PulseDrop Device',
+              ip: targetIp,
+              port: serverPort,
+              version: data['version'] ?? '5.0',
+            ),
+          );
+        }
+      }
+    } catch (_) {
+    } finally {
+      client.close(force: true);
+    }
   }
 
   Future<void> _handleRequest(HttpRequest request) async {
@@ -77,7 +277,7 @@ class NetworkService {
       request.response.write(jsonEncode({
         'app': 'PulseDrop',
         'name': deviceName,
-        'version': '4.0',
+        'version': '5.0',
       }));
       await request.response.close();
       return;
@@ -107,30 +307,99 @@ class NetworkService {
       final senderName = Uri.decodeComponent(
         request.headers.value('x-sender-name') ?? 'جهاز قريب',
       );
+      final declaredSize = int.tryParse(
+            request.headers.value('x-file-size') ??
+                request.headers.value('content-length') ??
+                '0',
+          ) ??
+          0;
 
       final dir = await _getDownloadDirectory();
       final saveFile = File('${dir.path}/$fileName');
       final sink = saveFile.openWrite();
-      int totalBytes = 0;
-      await for (final chunk in request) {
-        totalBytes += chunk.length;
-        sink.add(chunk);
-      }
-      await sink.flush();
-      await sink.close();
 
-      _transferController.add(TransferRecord(
+      int receivedBytes = 0;
+      final stopwatch = Stopwatch()..start();
+      int lastUiUpdateMs = 0;
+
+      activeTransfer.value = TransferProgress(
         fileName: fileName,
         filePath: saveFile.path,
         peerName: senderName,
-        isSent: false,
-        timestamp: DateTime.now(),
-        sizeBytes: totalBytes,
-      ));
+        isSending: false,
+        bytesTransferred: 0,
+        totalBytes: declaredSize,
+        speedBytesPerSec: 0,
+        remainingSeconds: 0,
+      );
 
-      request.response.statusCode = HttpStatus.ok;
-      request.response.write('UPLOADED');
-      await request.response.close();
+      try {
+        await for (final chunk in request) {
+          receivedBytes += chunk.length;
+          sink.add(chunk);
+
+          final elapsedMs = stopwatch.elapsedMilliseconds;
+          if (elapsedMs - lastUiUpdateMs >= 120) {
+            lastUiUpdateMs = elapsedMs;
+            final speed = elapsedMs > 0 ? (receivedBytes / (elapsedMs / 1000.0)) : 0.0;
+            final remaining = (declaredSize > receivedBytes && speed > 0)
+                ? ((declaredSize - receivedBytes) / speed).ceil()
+                : 0;
+            activeTransfer.value = TransferProgress(
+              fileName: fileName,
+              filePath: saveFile.path,
+              peerName: senderName,
+              isSending: false,
+              bytesTransferred: receivedBytes,
+              totalBytes: declaredSize > 0 ? declaredSize : receivedBytes,
+              speedBytesPerSec: speed,
+              remainingSeconds: remaining,
+            );
+          }
+        }
+        await sink.flush();
+        await sink.close();
+
+        final totalFinal = declaredSize > 0 ? declaredSize : receivedBytes;
+        activeTransfer.value = TransferProgress(
+          fileName: fileName,
+          filePath: saveFile.path,
+          peerName: senderName,
+          isSending: false,
+          bytesTransferred: totalFinal,
+          totalBytes: totalFinal,
+          speedBytesPerSec: 0,
+          remainingSeconds: 0,
+          isCompleted: true,
+        );
+
+        _transferController.add(TransferRecord(
+          fileName: fileName,
+          filePath: saveFile.path,
+          peerName: senderName,
+          isSent: false,
+          timestamp: DateTime.now(),
+          sizeBytes: receivedBytes,
+        ));
+
+        request.response.statusCode = HttpStatus.ok;
+        request.response.write('UPLOADED');
+        await request.response.close();
+      } catch (_) {
+        await sink.close();
+        activeTransfer.value = TransferProgress(
+          fileName: fileName,
+          peerName: senderName,
+          isSending: false,
+          bytesTransferred: receivedBytes,
+          totalBytes: declaredSize,
+          speedBytesPerSec: 0,
+          remainingSeconds: 0,
+          isFailed: true,
+        );
+        request.response.statusCode = HttpStatus.internalServerError;
+        await request.response.close();
+      }
       return;
     }
 
@@ -155,7 +424,6 @@ class NetworkService {
       return;
     }
 
-    // Web Portal UI
     request.response.headers.contentType = ContentType.html;
     request.response.write(_buildWebPortalHtml());
     await request.response.close();
@@ -229,6 +497,7 @@ class NetworkService {
         method: 'POST',
         headers: {
           'x-file-name': encodeURIComponent(file.name),
+          'x-file-size': file.size.toString(),
           'x-sender-name': encodeURIComponent('متصفح الويب')
         },
         body: file
@@ -241,91 +510,117 @@ class NetworkService {
 ''';
   }
 
-  /// Fast Subnet Auto-Discovery (scans all 254 IPs in parallel batches)
-  Future<List<NetworkDevice>> scanSubnet() async {
-    final ip = await getLocalIpAddress();
-    if (ip == null || !ip.contains('.')) return [];
+  Future<bool> sendFileToDevice(NetworkDevice device, File file) async {
+    final fileName = file.path.split('/').last;
+    final totalBytes = await file.length();
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 10);
 
-    final parts = ip.split('.');
-    if (parts.length != 4) return [];
-    final subnet = '${parts[0]}.${parts[1]}.${parts[2]}';
+    int sentBytes = 0;
+    final stopwatch = Stopwatch()..start();
+    int lastUiUpdateMs = 0;
 
-    final List<NetworkDevice> found = [];
-    const batchSize = 32;
+    activeTransfer.value = TransferProgress(
+      fileName: fileName,
+      filePath: file.path,
+      peerName: device.name,
+      isSending: true,
+      bytesTransferred: 0,
+      totalBytes: totalBytes,
+      speedBytesPerSec: 0,
+      remainingSeconds: 0,
+    );
 
-    for (int start = 1; start <= 254; start += batchSize) {
-      final futures = <Future<void>>[];
-      for (int i = start; i < start + batchSize && i <= 254; i++) {
-        final targetIp = '$subnet.$i';
-        if (targetIp == ip) continue;
-        futures.add(_probeDevice(targetIp, found));
-      }
-      await Future.wait(futures);
-    }
-    return found;
-  }
-
-  Future<void> _probeDevice(String targetIp, List<NetworkDevice> found) async {
     try {
-      final response = await http
-          .get(Uri.parse('http://$targetIp:$serverPort/ping'))
-          .timeout(const Duration(milliseconds: 550));
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        if (data['app'] == 'PulseDrop') {
-          found.add(NetworkDevice(
-            name: data['name'] ?? 'PulseDrop Device',
-            ip: targetIp,
-            port: serverPort,
-            version: data['version'] ?? '4.0',
-          ));
+      final request = await client.postUrl(
+        Uri.parse('http://${device.ip}:${device.port}/upload'),
+      );
+      request.contentLength = totalBytes;
+      request.headers.set('x-file-name', Uri.encodeComponent(fileName));
+      request.headers.set('x-sender-name', Uri.encodeComponent(deviceName));
+      request.headers.set('x-file-size', totalBytes.toString());
+
+      await for (final chunk in file.openRead()) {
+        request.add(chunk);
+        sentBytes += chunk.length;
+
+        final elapsedMs = stopwatch.elapsedMilliseconds;
+        if (elapsedMs - lastUiUpdateMs >= 100) {
+          lastUiUpdateMs = elapsedMs;
+          final speed = elapsedMs > 0 ? (sentBytes / (elapsedMs / 1000.0)) : 0.0;
+          final remaining = (totalBytes > sentBytes && speed > 0)
+              ? ((totalBytes - sentBytes) / speed).ceil()
+              : 0;
+          activeTransfer.value = TransferProgress(
+            fileName: fileName,
+            filePath: file.path,
+            peerName: device.name,
+            isSending: true,
+            bytesTransferred: sentBytes,
+            totalBytes: totalBytes,
+            speedBytesPerSec: speed,
+            remainingSeconds: remaining,
+          );
         }
       }
-    } catch (_) {}
-  }
 
-  Future<bool> sendFileToDevice(NetworkDevice device, File file) async {
-    try {
-      final fileName = file.path.split('/').last;
-      final bytes = await file.readAsBytes();
-      final response = await http
-          .post(
-            Uri.parse('http://${device.ip}:${device.port}/upload'),
-            headers: {
-              'x-file-name': Uri.encodeComponent(fileName),
-              'x-sender-name': Uri.encodeComponent(deviceName),
-            },
-            body: bytes,
-          )
-          .timeout(const Duration(minutes: 5));
-
+      final response = await request.close().timeout(const Duration(minutes: 5));
       if (response.statusCode == 200) {
+        activeTransfer.value = TransferProgress(
+          fileName: fileName,
+          filePath: file.path,
+          peerName: device.name,
+          isSending: true,
+          bytesTransferred: totalBytes,
+          totalBytes: totalBytes,
+          speedBytesPerSec: 0,
+          remainingSeconds: 0,
+          isCompleted: true,
+        );
+
         _transferController.add(TransferRecord(
           fileName: fileName,
           filePath: file.path,
           peerName: device.name,
           isSent: true,
           timestamp: DateTime.now(),
-          sizeBytes: bytes.length,
+          sizeBytes: totalBytes,
         ));
         return true;
       }
-    } catch (_) {}
+    } catch (_) {
+    } finally {
+      client.close();
+    }
+
+    activeTransfer.value = TransferProgress(
+      fileName: fileName,
+      filePath: file.path,
+      peerName: device.name,
+      isSending: true,
+      bytesTransferred: sentBytes,
+      totalBytes: totalBytes,
+      speedBytesPerSec: 0,
+      remainingSeconds: 0,
+      isFailed: true,
+    );
     return false;
   }
 
   Future<bool> sendChatToDevice(NetworkDevice device, String text) async {
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 4);
     try {
-      final response = await http
-          .post(
-            Uri.parse('http://${device.ip}:${device.port}/chat'),
-            headers: {'Content-Type': 'application/json'},
-            body: jsonEncode({'sender': deviceName, 'text': text}),
-          )
-          .timeout(const Duration(seconds: 4));
+      final request = await client.postUrl(
+        Uri.parse('http://${device.ip}:${device.port}/chat'),
+      );
+      request.headers.contentType = ContentType.json;
+      request.write(jsonEncode({'sender': deviceName, 'text': text}));
+      final response = await request.close();
       return response.statusCode == 200;
     } catch (_) {
       return false;
+    } finally {
+      client.close();
     }
   }
 }

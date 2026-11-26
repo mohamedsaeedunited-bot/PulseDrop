@@ -1,10 +1,9 @@
 import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import 'package:mobile_scanner/mobile_scanner.dart';
-import 'package:permission_handler/permission_handler.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import '../services/network_service.dart';
+import 'qr_scanner_screen.dart';
 
 class WebShareSheet extends StatefulWidget {
   final NetworkService networkService;
@@ -21,36 +20,7 @@ class WebShareSheet extends StatefulWidget {
 }
 
 class _WebShareSheetState extends State<WebShareSheet> {
-  int _selectedTab = 0; // 0: Web Portal, 1: QR Scan, 2: Hotspot QR
-  bool _cameraGranted = false;
-  bool _checkingCamera = false;
-  MobileScannerController? _scannerController;
-
-  @override
-  void dispose() {
-    _scannerController?.dispose();
-    super.dispose();
-  }
-
-  Future<void> _initCamera() async {
-    setState(() => _checkingCamera = true);
-    final status = await Permission.camera.request();
-    if (status.isGranted) {
-      _scannerController?.dispose();
-      _scannerController = MobileScannerController(
-        detectionSpeed: DetectionSpeed.noDuplicates,
-      );
-      setState(() {
-        _cameraGranted = true;
-        _checkingCamera = false;
-      });
-    } else {
-      setState(() {
-        _cameraGranted = false;
-        _checkingCamera = false;
-      });
-    }
-  }
+  int _selectedTab = 0;
 
   Future<void> _pickWebFiles() async {
     final result = await FilePicker.platform.pickFiles(allowMultiple: true);
@@ -65,6 +35,17 @@ class _WebShareSheetState extends State<WebShareSheet> {
     }
   }
 
+  Future<void> _launchFullScreenQrScanner() async {
+    final scannedIp = await Navigator.push<String>(
+      context,
+      MaterialPageRoute(builder: (_) => const QrScannerScreen()),
+    );
+    if (scannedIp != null && scannedIp.isNotEmpty && mounted) {
+      Navigator.pop(context);
+      widget.onQrIpScanned(scannedIp);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final ip = widget.networkService.localIp ?? 'غير متصل بالواي فاي';
@@ -73,7 +54,7 @@ class _WebShareSheetState extends State<WebShareSheet> {
     return SafeArea(
       top: false,
       child: Container(
-        height: MediaQuery.of(context).size.height * 0.78,
+        height: MediaQuery.of(context).size.height * 0.74,
         padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
         decoration: BoxDecoration(
           color: Theme.of(context).scaffoldBackgroundColor,
@@ -93,17 +74,16 @@ class _WebShareSheetState extends State<WebShareSheet> {
             SegmentedButton<int>(
               segments: const [
                 ButtonSegment(value: 0, label: Text('بوابة الويب')),
-                ButtonSegment(value: 1, label: Text('مسح QR')),
-                ButtonSegment(value: 2, label: Text('هوتسبوت QR')),
+                ButtonSegment(value: 1, label: Text('مسح QR بالكاميرا')),
+                ButtonSegment(value: 2, label: Text('هوتسبوت')),
               ],
               selected: {_selectedTab},
               onSelectionChanged: (val) {
                 final next = val.first;
-                setState(() => _selectedTab = next);
                 if (next == 1) {
-                  _initCamera();
+                  _launchFullScreenQrScanner();
                 } else {
-                  _scannerController?.stop();
+                  setState(() => _selectedTab = next);
                 }
               },
             ),
@@ -111,9 +91,7 @@ class _WebShareSheetState extends State<WebShareSheet> {
             Expanded(
               child: _selectedTab == 0
                   ? _buildWebPortalTab(webUrl)
-                  : _selectedTab == 1
-                      ? _buildQrScannerTab()
-                      : _buildHotspotTab(webUrl),
+                  : _buildHotspotTab(webUrl),
             ),
           ],
         ),
@@ -139,7 +117,7 @@ class _WebShareSheetState extends State<WebShareSheet> {
             ),
             child: QrImageView(
               data: webUrl,
-              size: 190,
+              size: 185,
             ),
           ),
           const SizedBox(height: 14),
@@ -158,77 +136,26 @@ class _WebShareSheetState extends State<WebShareSheet> {
             style: TextStyle(color: Colors.grey),
           ),
           const SizedBox(height: 16),
-          FilledButton.icon(
-            onPressed: _pickWebFiles,
-            icon: const Icon(Icons.add_circle_outline),
-            label: Text(
-              'اختيار ملفات للمشاركة (${widget.networkService.sharedWebFiles.length})',
-            ),
+          Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            alignment: WrapAlignment.center,
+            children: [
+              FilledButton.icon(
+                onPressed: _pickWebFiles,
+                icon: const Icon(Icons.add_circle_outline),
+                label: Text(
+                  'مشاركة ملفات (${widget.networkService.sharedWebFiles.length})',
+                ),
+              ),
+              OutlinedButton.icon(
+                onPressed: _launchFullScreenQrScanner,
+                icon: const Icon(Icons.qr_code_scanner),
+                label: const Text('فتح كاميرا المسح'),
+              ),
+            ],
           ),
         ],
-      ),
-    );
-  }
-
-  Widget _buildQrScannerTab() {
-    if (_checkingCamera) {
-      return const Center(child: CircularProgressIndicator());
-    }
-    if (!_cameraGranted || _scannerController == null) {
-      return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.camera_alt_outlined, size: 56, color: Colors.grey),
-            const SizedBox(height: 12),
-            const Text('يلزم السماح بإذن الكاميرا لمسح رمز QR'),
-            const SizedBox(height: 12),
-            FilledButton(
-              onPressed: _initCamera,
-              child: const Text('تفعيل الكاميرا'),
-            ),
-          ],
-        ),
-      );
-    }
-
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(20),
-      child: MobileScanner(
-        controller: _scannerController!,
-        errorBuilder: (context, error, child) {
-          return Center(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Icon(Icons.error_outline, color: Colors.red, size: 48),
-                const SizedBox(height: 8),
-                const Text('تعذر تشغيل الكاميرا، حاول مرة أخرى'),
-                const SizedBox(height: 12),
-                FilledButton(
-                  onPressed: _initCamera,
-                  child: const Text('إعادة المحاولة'),
-                ),
-              ],
-            ),
-          );
-        },
-        onDetect: (capture) {
-          for (final barcode in capture.barcodes) {
-            final raw = barcode.rawValue;
-            if (raw != null && raw.isNotEmpty) {
-              _scannerController?.stop();
-              Navigator.pop(context);
-              final cleaned = raw
-                  .replaceAll('http://', '')
-                  .replaceAll('https://', '')
-                  .split(':')
-                  .first;
-              widget.onQrIpScanned(cleaned);
-              break;
-            }
-          }
-        },
       ),
     );
   }
@@ -240,16 +167,16 @@ class _WebShareSheetState extends State<WebShareSheet> {
         const Icon(Icons.wifi_tethering, size: 64, color: Color(0xFF0284C7)),
         const SizedBox(height: 16),
         const Text(
-          'النقل بدون راوتر (هوتسبوت)',
+          'النقل السريع بدون راوتر (هوتسبوت)',
           style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
         ),
         const SizedBox(height: 8),
         const Padding(
           padding: EdgeInsets.symmetric(horizontal: 20),
           child: Text(
-            'افتح نقطة الاتصال (Hotspot) من موبايلك، ووصّل الموبايل التاني عليها، واضغط "إرسال" وهيكتشفه تلقائياً بدون سحب من الباقة.',
+            '1. افتح نقطة الاتصال (Hotspot) من موبايلك.\n2. وصّل الموبايل الآخر عليها.\n3. اضغط "إرسال" وسيظهر الموبايل تلقائياً خلال ثانية واحدة بدون سحب من الباقة.',
             textAlign: TextAlign.center,
-            style: TextStyle(color: Colors.grey),
+            style: TextStyle(color: Colors.grey, height: 1.5),
           ),
         ),
         const SizedBox(height: 16),

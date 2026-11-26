@@ -23,15 +23,6 @@ class BluetoothDiscoveryService {
     return scanOk || locOk;
   }
 
-  Future<bool> isBluetoothOn() async {
-    try {
-      final state = await FlutterBluePlus.adapterState.first;
-      return state == BluetoothAdapterState.on;
-    } catch (_) {
-      return false;
-    }
-  }
-
   Future<void> startScan() async {
     _foundMap.clear();
     _devicesController.add([]);
@@ -42,15 +33,17 @@ class BluetoothDiscoveryService {
     await _scanSub?.cancel();
     _scanSub = FlutterBluePlus.scanResults.listen((results) {
       for (final r in results) {
-        final name = r.device.platformName.isNotEmpty
-            ? r.device.platformName
-            : (r.advertisementData.advName.isNotEmpty
-                ? r.advertisementData.advName
-                : 'جهاز بلوتوث (${r.device.remoteId.str.substring(0, 8)})');
+        final pName = r.device.platformName.trim();
+        final aName = r.advertisementData.advName.trim();
+        final resolvedName = pName.isNotEmpty ? pName : aName;
+
+        if (resolvedName.isEmpty || r.rssi < -88) {
+          continue;
+        }
 
         _foundMap[r.device.remoteId.str] = BluetoothDeviceItem(
           id: r.device.remoteId.str,
-          name: name,
+          name: resolvedName,
           rssi: r.rssi,
         );
       }
@@ -60,7 +53,7 @@ class BluetoothDiscoveryService {
     });
 
     try {
-      await FlutterBluePlus.startScan(timeout: const Duration(seconds: 8));
+      await FlutterBluePlus.startScan(timeout: const Duration(seconds: 10));
     } catch (_) {}
   }
 
