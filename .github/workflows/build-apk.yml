@@ -1,13 +1,16 @@
-name: Build PulseDrop v3 Android APK
+name: Build & Release PulseDrop APK
 
 on:
   push:
     branches: [ main, master ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
-  build-apk:
-    name: Build Release APK with Custom Logo
+  build:
+    name: Build Signed APK & Publish Update Release
     runs-on: ubuntu-latest
 
     steps:
@@ -26,48 +29,82 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Generate Android Platform Files (Personal Package ID)
+      - name: Restore Fixed Signing Keystore
         run: |
-          flutter create --platforms=android --org com.mohamedsaeed --project-name pulsedrop .
+          mkdir -p "$HOME/.android"
+          if [ -n "${{ secrets.PULSEDROP_KEYSTORE_BASE64 }}" ]; then
+            echo "${{ secrets.PULSEDROP_KEYSTORE_BASE64 }}" | tr -d '\r\n ' | base64 -d > "$HOME/.android/debug.keystore"
+            echo "Fixed signing keystore restored successfully."
+          else
+            echo "WARNING: PULSEDROP_KEYSTORE_BASE64 secret not found. Using temporary keystore."
+          fi
+
+      - name: Read App Version
+        id: appver
+        run: |
+          VER=$(grep '^version:' pubspec.yaml | awk '{print $2}' | cut -d'+' -f1)
+          echo "ver=${VER}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VER}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate Android Platform Files
+        run: |
+          if [ ! -d "android" ]; then
+            flutter create . --platforms=android --org com.pulsedrop.app --project-name pulsedrop
+          fi
+
+      - name: Apply Custom AndroidManifest.xml
+        run: |
+          mkdir -p android/app/src/main
           cp config/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
-          if [ -f android/build.gradle.kts ]; then
-            cat << 'EOF' >> android/build.gradle.kts
 
-          subprojects {
-              plugins.withId("com.android.library") {
-                  extensions.findByName("android")?.let { ext ->
-                      try {
-                          ext.javaClass.getMethod("compileSdkVersion", Int::class.javaPrimitiveType).invoke(ext, 36)
-                      } catch (_: Exception) {}
-                  }
-              }
-          }
-          EOF
-          elif [ -f android/build.gradle ]; then
-            cat << 'EOF' >> android/build.gradle
-
-          subprojects {
-              plugins.withId("com.android.library") {
-                  android {
-                      compileSdkVersion 36
-                  }
-              }
-          }
-          EOF
+      - name: Configure Android SDK 36 & MinSDK 24
+        run: |
+          if [ -f "android/app/build.gradle.kts" ]; then
+            sed -i 's/compileSdk = flutter.compileSdkVersion/compileSdk = 36/g' android/app/build.gradle.kts
+            sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 24/g' android/app/build.gradle.kts
+            sed -i 's/targetSdk = flutter.targetSdkVersion/targetSdk = 35/g' android/app/build.gradle.kts
+          fi
+          if [ -f "android/app/build.gradle" ]; then
+            sed -i 's/compileSdk = flutter.compileSdkVersion/compileSdk = 36/g' android/app/build.gradle
+            sed -i 's/compileSdkVersion flutter.compileSdkVersion/compileSdkVersion 36/g' android/app/build.gradle
+            sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 24/g' android/app/build.gradle
+            sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 24/g' android/app/build.gradle
+            sed -i 's/targetSdk = flutter.targetSdkVersion/targetSdk = 35/g' android/app/build.gradle
+            sed -i 's/targetSdkVersion flutter.targetSdkVersion/targetSdkVersion 35/g' android/app/build.gradle
           fi
 
       - name: Install Dependencies
         run: flutter pub get
 
       - name: Generate Custom PulseDrop App Icons
-        run: dart run flutter_launcher_icons
+        run: |
+          if [ -f "assets/icon/pulsedrop_icon.png" ]; then
+            dart run flutter_launcher_icons
+          else
+            echo "Custom icon not found, using default launcher icon."
+          fi
 
       - name: Build Release APK
-        run: flutter build apk --release --no-tree-shake-icons
+        run: flutter build apk --release
 
-      - name: Upload PulseDrop v3 APK
+      - name: Publish GitHub Release for In-App Auto-Update
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.appver.outputs.tag }}"
+          APK_NAME="PulseDrop-${TAG}.apk"
+          cp build/app/outputs/flutter-apk/app-release.apk "${APK_NAME}"
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" "${APK_NAME}" --clobber
+          else
+            gh release create "${TAG}" "${APK_NAME}" \
+              --title "PulseDrop ${TAG}" \
+              --notes "تحديث جديد لتطبيق PulseDrop (${TAG}) جاهز للتثبيت المباشر من داخل التطبيق."
+          fi
+
+      - name: Upload APK Artifact Backup
         uses: actions/upload-artifact@v4
         with:
-          name: PulseDrop-v3-APK
+          name: PulseDrop-${{ steps.appver.outputs.tag }}-APK
           path: build/app/outputs/flutter-apk/app-release.apk
           retention-days: 30
