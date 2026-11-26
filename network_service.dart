@@ -20,6 +20,7 @@ class NetworkService {
   String? localIp;
   List<String> _allLocalIps = [];
   bool isVisible = true;
+  int _scanGeneration = 0;
 
   final List<File> sharedWebFiles = [];
 
@@ -60,20 +61,39 @@ class NetworkService {
     sendUdpBeacon();
   }
 
+  bool _isHotspotInterface(String ifName, String ip) {
+    return ifName.contains('swlan') ||
+        ifName.contains('softap') ||
+        ifName.contains('tether') ||
+        ifName.startsWith('ap') ||
+        ifName == 'wlan1' ||
+        ifName == 'wlan2' ||
+        ip == '192.168.43.1' ||
+        ip == '192.168.137.1';
+  }
+
+  bool _isSameSubnet(String ipA, String ipB) {
+    final a = ipA.split('.');
+    final b = ipB.split('.');
+    if (a.length != 4 || b.length != 4) return false;
+    return a[0] == b[0] && a[1] == b[1] && a[2] == b[2];
+  }
+
+  void _pruneStaleDevices() {
+    if (_allLocalIps.isEmpty) return;
+    final current = discoveredDevices.value;
+    final filtered = current.where((dev) {
+      return _allLocalIps.any((myIp) => _isSameSubnet(myIp, dev.ip));
+    }).toList();
+    if (filtered.length != current.length) {
+      discoveredDevices.value = filtered;
+    }
+  }
+
   Future<String?> getLocalIpAddress() async {
     final foundIps = <String>[];
-    String? preferredIp;
-
-    try {
-      final info = NetworkInfo();
-      final wifiIp = await info.getWifiIP();
-      if (wifiIp != null && wifiIp.isNotEmpty && wifiIp != '0.0.0.0') {
-        foundIps.add(wifiIp);
-        if (wifiIp.startsWith('192.168.')) {
-          preferredIp = wifiIp;
-        }
-      }
-    } catch (_) {}
+    String? hotspotIp;
+    String? wifiPreferredIp;
 
     try {
       final interfaces = await NetworkInterface.list(
@@ -89,7 +109,8 @@ class NetworkService {
             ifName.contains('pdp') ||
             ifName.contains('tun') ||
             ifName.contains('ppp') ||
-            ifName.contains('dummy')) {
+            ifName.contains('dummy') ||
+            ifName.contains('v4-')) {
           continue;
         }
         for (final addr in iface.addresses) {
@@ -98,29 +119,48 @@ class NetworkService {
           if (!foundIps.contains(ip)) {
             foundIps.add(ip);
           }
-          if (preferredIp == null &&
-              (ifName.contains('wlan') ||
-                  ifName.contains('swlan') ||
-                  ifName.contains('ap') ||
-                  ip.startsWith('192.168.'))) {
-            preferredIp = ip;
+          if (_isHotspotInterface(ifName, ip)) {
+            hotspotIp ??= ip;
+          } else if (ifName.contains('wlan') || ip.startsWith('192.168.')) {
+            wifiPreferredIp ??= ip;
           }
         }
       }
     } catch (_) {}
 
+    try {
+      final info = NetworkInfo();
+      final wifiIp = await info.getWifiIP();
+      if (wifiIp != null && wifiIp.isNotEmpty && wifiIp != '0.0.0.0') {
+        if (!foundIps.contains(wifiIp)) {
+          foundIps.add(wifiIp);
+        }
+        if (wifiIp.startsWith('192.168.')) {
+          wifiPreferredIp ??= wifiIp;
+        }
+      }
+    } catch (_) {}
+
+    final prevIpsKey = _allLocalIps.join(',');
     _allLocalIps = foundIps;
-    localIp = preferredIp ?? (foundIps.isNotEmpty ? foundIps.first : localIp);
+    final newIpsKey = _allLocalIps.join(',');
+
+    // Prioritize active Hotspot IP when hosting a Hotspot so QR/display matches Hotspot clients
+    localIp = hotspotIp ??
+        wifiPreferredIp ??
+        (foundIps.isNotEmpty ? foundIps.first : localIp);
     localIpNotifier.value = localIp;
+
+    if (prevIpsKey != newIpsKey && foundIps.isNotEmpty) {
+      _pruneStaleDevices();
+      await _restartUdpSocket();
+    }
     return localIp;
   }
 
   String? _findMatchingLocalIp(String targetIp) {
-    final parts = targetIp.split('.');
-    if (parts.length != 4) return localIp;
-    final prefix = '${parts[0]}.${parts[1]}.${parts[2]}.';
     for (final ip in _allLocalIps) {
-      if (ip.startsWith(prefix)) {
+      if (_isSameSubnet(ip, targetIp)) {
         return ip;
       }
     }
@@ -132,8 +172,11 @@ class NetworkService {
   HttpClient _createBoundClient(
     String targetIp, {
     Duration timeout = const Duration(seconds: 10),
+    bool useSourceBind = true,
   }) {
     final client = HttpClient()..connectionTimeout = timeout;
+    if (!useSourceBind) return client;
+
     final matchedLocal = _findMatchingLocalIp(targetIp);
     if (matchedLocal != null) {
       client.connectionFactory =
@@ -177,6 +220,14 @@ class NetworkService {
     _udpSocket = null;
     await _server?.close(force: true);
     _server = null;
+  }
+
+  Future<void> _restartUdpSocket() async {
+    try {
+      _udpSocket?.close();
+      _udpSocket = null;
+      await _startUdpDiscovery();
+    } catch (_) {}
   }
 
   Future<void> _startHttpServer() async {
@@ -274,10 +325,16 @@ class NetworkService {
 
   void _registerDiscoveredDevice(NetworkDevice device) {
     final current = List<NetworkDevice>.from(discoveredDevices.value);
-    final idx = current.indexWhere((d) => d.ip == device.ip);
-    if (idx >= 0) {
-      current[idx] = device;
+    final ipIdx = current.indexWhere((d) => d.ip == device.ip);
+    if (ipIdx >= 0) {
+      current[ipIdx] = device;
     } else {
+      // Replace stale entry for the same device name if it moved to a new IP/Hotspot
+      current.removeWhere(
+        (d) =>
+            d.name == device.name &&
+            !_allLocalIps.any((myIp) => _isSameSubnet(myIp, d.ip)),
+      );
       current.add(device);
     }
     discoveredDevices.value = current;
@@ -285,77 +342,94 @@ class NetworkService {
 
   /// Dual Auto-Discovery across ALL local Wi-Fi and Hotspot interfaces
   Future<void> startAutoDiscovery() async {
+    final myGen = ++_scanGeneration;
     await ensureServicesAlive();
-
-    if (isScanning.value) return;
+    _pruneStaleDevices();
     isScanning.value = true;
 
     try {
-      final candidates = <String>{
+      final priorityCandidates = <String>{
         '192.168.43.1',
         '192.168.137.1',
         '172.20.10.1',
-        '192.168.1.1',
-        '192.168.0.1',
       };
 
+      final subnetCandidates = <String>{};
       for (final ip in _allLocalIps) {
         final parts = ip.split('.');
         if (parts.length == 4) {
           final subnet = '${parts[0]}.${parts[1]}.${parts[2]}';
-          for (int i = 1; i <= 254; i++) {
-            candidates.add('$subnet.$i');
+          priorityCandidates.add('$subnet.1');
+          for (int i = 2; i <= 254; i++) {
+            subnetCandidates.add('$subnet.$i');
           }
         }
       }
 
       for (final ip in _allLocalIps) {
-        candidates.remove(ip);
+        priorityCandidates.remove(ip);
+        subnetCandidates.remove(ip);
       }
 
-      final list = candidates.toList();
-      const batchSize = 40;
+      // 1. Probe gateways/hotspot hosts first for near-instant discovery
+      await Future.wait(
+        priorityCandidates.map((ip) => _probeDeviceHttp(ip, serverPort)),
+      );
+
+      if (myGen != _scanGeneration) return;
+
+      // 2. Fast parallel subnet scan on primary port 8080 (with 900ms ARP-safe timeout)
+      final list = subnetCandidates.toList();
+      const batchSize = 48;
       for (int start = 0; start < list.length; start += batchSize) {
+        if (myGen != _scanGeneration) return;
         final batch = list.skip(start).take(batchSize);
-        await Future.wait(batch.map((ip) => _probeDeviceHttp(ip)));
+        await Future.wait(batch.map((ip) => _probeDeviceHttp(ip, serverPort)));
+      }
+
+      // Send one more UDP wave after HTTP sweep
+      if (myGen == _scanGeneration) {
+        sendUdpBeacon();
       }
     } finally {
-      isScanning.value = false;
+      if (myGen == _scanGeneration) {
+        isScanning.value = false;
+      }
     }
   }
 
-  Future<void> _probeDeviceHttp(String targetIp) async {
-    for (final port in [serverPort, 8088]) {
-      final client = _createBoundClient(
-        targetIp,
-        timeout: const Duration(milliseconds: 450),
-      );
-      try {
-        final request = await client
-            .getUrl(Uri.parse('http://$targetIp:$port/ping'))
-            .timeout(const Duration(milliseconds: 500));
-        final response =
-            await request.close().timeout(const Duration(milliseconds: 500));
-        if (response.statusCode == 200) {
-          final body = await utf8.decoder.bind(response).join();
-          final data = jsonDecode(body);
-          if (data['app'] == 'PulseDrop') {
-            _registerDiscoveredDevice(
-              NetworkDevice(
-                name: data['name'] ?? 'PulseDrop Device',
-                ip: targetIp,
-                port: data['port'] ?? port,
-                version: data['version'] ?? '5.3',
-              ),
-            );
-            return;
-          }
+  Future<bool> _probeDeviceHttp(String targetIp, int port) async {
+    final client = _createBoundClient(
+      targetIp,
+      timeout: const Duration(milliseconds: 900),
+      useSourceBind: true,
+    );
+    try {
+      final request = await client
+          .getUrl(Uri.parse('http://$targetIp:$port/ping'))
+          .timeout(const Duration(milliseconds: 1000));
+      final response =
+          await request.close().timeout(const Duration(milliseconds: 1000));
+      if (response.statusCode == 200) {
+        final body = await utf8.decoder.bind(response).join();
+        final data = jsonDecode(body);
+        if (data['app'] == 'PulseDrop') {
+          _registerDiscoveredDevice(
+            NetworkDevice(
+              name: data['name'] ?? 'PulseDrop Device',
+              ip: targetIp,
+              port: data['port'] ?? port,
+              version: data['version'] ?? '5.3',
+            ),
+          );
+          return true;
         }
-      } catch (_) {
-      } finally {
-        client.close(force: true);
       }
+    } catch (_) {
+    } finally {
+      client.close(force: true);
     }
+    return false;
   }
 
   String _safeDecode(String raw) {
@@ -554,7 +628,7 @@ class NetworkService {
     return File('${dir.path}/${base}_$stamp$ext');
   }
 
-  /// Tests ACTUAL write access before choosing a folder (fixes Android 11-16 Scoped Storage errors)
+  /// Tests ACTUAL write access before choosing a folder (fixes Android 11-17 Scoped Storage errors)
   Future<Directory> _getWritableDownloadDirectory() async {
     final candidates = <Directory>[
       Directory('/storage/emulated/0/Download/PulseDrop'),
@@ -657,100 +731,116 @@ class NetworkService {
 ''';
   }
 
-  /// Streamed File Upload bound to the matching Wi-Fi/Hotspot interface with real progress & diagnostics
+  /// Dual-Attempt File Upload: first bound to the matching Wi-Fi/Hotspot interface
+  /// (bypasses 4G/5G Mobile Data routing), with automatic unbound fallback for strict Android OEMs.
   Future<bool> sendFileToDevice(NetworkDevice device, File file) async {
     await getLocalIpAddress();
     final fileName = file.path.split('/').last;
     final totalBytes = await file.length();
-    final client = _createBoundClient(
-      device.ip,
-      timeout: const Duration(seconds: 12),
-    );
 
-    int sentBytes = 0;
-    String errorReason = '';
-    final stopwatch = Stopwatch()..start();
-    int lastUiUpdateMs = 0;
+    String lastError = '';
+    int lastSentBytes = 0;
 
-    activeTransfer.value = TransferProgress(
-      fileName: fileName,
-      filePath: file.path,
-      peerName: device.name,
-      isSending: true,
-      bytesTransferred: 0,
-      totalBytes: totalBytes,
-      speedBytesPerSec: 0,
-      remainingSeconds: 0,
-    );
+    final attempts = _findMatchingLocalIp(device.ip) != null
+        ? [true, false]
+        : [false];
 
-    try {
-      final request = await client.postUrl(
-        Uri.parse('http://${device.ip}:${device.port}/upload'),
+    for (final bindSource in attempts) {
+      final client = _createBoundClient(
+        device.ip,
+        timeout: const Duration(seconds: 12),
+        useSourceBind: bindSource,
       );
-      request.bufferOutput = false;
-      request.contentLength = totalBytes;
-      request.headers.set('x-file-name', Uri.encodeComponent(fileName));
-      request.headers.set('x-sender-name', Uri.encodeComponent(deviceName));
-      request.headers.set('x-file-size', totalBytes.toString());
 
-      await for (final chunk in file.openRead()) {
-        request.add(chunk);
-        sentBytes += chunk.length;
+      int sentBytes = 0;
+      final stopwatch = Stopwatch()..start();
+      int lastUiUpdateMs = 0;
 
-        final elapsedMs = stopwatch.elapsedMilliseconds;
-        if (elapsedMs - lastUiUpdateMs >= 100) {
-          lastUiUpdateMs = elapsedMs;
-          await request.flush();
-          final speed =
-              elapsedMs > 0 ? (sentBytes / (elapsedMs / 1000.0)) : 0.0;
-          final remaining = (totalBytes > sentBytes && speed > 0)
-              ? ((totalBytes - sentBytes) / speed).ceil()
-              : 0;
+      activeTransfer.value = TransferProgress(
+        fileName: fileName,
+        filePath: file.path,
+        peerName: device.name,
+        isSending: true,
+        bytesTransferred: 0,
+        totalBytes: totalBytes,
+        speedBytesPerSec: 0,
+        remainingSeconds: 0,
+      );
+
+      try {
+        final request = await client.postUrl(
+          Uri.parse('http://${device.ip}:${device.port}/upload'),
+        );
+        request.bufferOutput = false;
+        request.contentLength = totalBytes;
+        request.headers.set('x-file-name', Uri.encodeComponent(fileName));
+        request.headers.set('x-sender-name', Uri.encodeComponent(deviceName));
+        request.headers.set('x-file-size', totalBytes.toString());
+
+        await for (final chunk in file.openRead()) {
+          request.add(chunk);
+          sentBytes += chunk.length;
+
+          final elapsedMs = stopwatch.elapsedMilliseconds;
+          if (elapsedMs - lastUiUpdateMs >= 100) {
+            lastUiUpdateMs = elapsedMs;
+            await request.flush();
+            final speed =
+                elapsedMs > 0 ? (sentBytes / (elapsedMs / 1000.0)) : 0.0;
+            final remaining = (totalBytes > sentBytes && speed > 0)
+                ? ((totalBytes - sentBytes) / speed).ceil()
+                : 0;
+            activeTransfer.value = TransferProgress(
+              fileName: fileName,
+              filePath: file.path,
+              peerName: device.name,
+              isSending: true,
+              bytesTransferred: sentBytes,
+              totalBytes: totalBytes,
+              speedBytesPerSec: speed,
+              remainingSeconds: remaining,
+            );
+          }
+        }
+
+        await request.flush();
+        final response =
+            await request.close().timeout(const Duration(minutes: 5));
+        if (response.statusCode == 200) {
           activeTransfer.value = TransferProgress(
             fileName: fileName,
             filePath: file.path,
             peerName: device.name,
             isSending: true,
-            bytesTransferred: sentBytes,
+            bytesTransferred: totalBytes,
             totalBytes: totalBytes,
-            speedBytesPerSec: speed,
-            remainingSeconds: remaining,
+            speedBytesPerSec: 0,
+            remainingSeconds: 0,
+            isCompleted: true,
           );
+
+          _transferController.add(TransferRecord(
+            fileName: fileName,
+            filePath: file.path,
+            peerName: device.name,
+            isSent: true,
+            timestamp: DateTime.now(),
+            sizeBytes: totalBytes,
+          ));
+          return true;
+        } else {
+          final serverMsg = await utf8.decoder.bind(response).join();
+          lastError = 'رد الجهاز الآخر (${response.statusCode}): $serverMsg';
+          lastSentBytes = sentBytes;
+          break; // Server responded with an HTTP error; do not retry socket binding
         }
+      } catch (e) {
+        lastError = e.toString().replaceAll('SocketException: ', '');
+        lastSentBytes = sentBytes;
+        if (sentBytes > 0) break; // Only fallback-retry if connection failed before sending bytes
+      } finally {
+        client.close(force: true);
       }
-
-      await request.flush();
-      final response = await request.close().timeout(const Duration(minutes: 5));
-      if (response.statusCode == 200) {
-        activeTransfer.value = TransferProgress(
-          fileName: fileName,
-          filePath: file.path,
-          peerName: device.name,
-          isSending: true,
-          bytesTransferred: totalBytes,
-          totalBytes: totalBytes,
-          speedBytesPerSec: 0,
-          remainingSeconds: 0,
-          isCompleted: true,
-        );
-
-        _transferController.add(TransferRecord(
-          fileName: fileName,
-          filePath: file.path,
-          peerName: device.name,
-          isSent: true,
-          timestamp: DateTime.now(),
-          sizeBytes: totalBytes,
-        ));
-        return true;
-      } else {
-        final serverMsg = await utf8.decoder.bind(response).join();
-        errorReason = 'رد الجهاز الآخر (${response.statusCode}): $serverMsg';
-      }
-    } catch (e) {
-      errorReason = e.toString().replaceAll('SocketException: ', '');
-    } finally {
-      client.close(force: true);
     }
 
     activeTransfer.value = TransferProgress(
@@ -758,33 +848,41 @@ class NetworkService {
       filePath: file.path,
       peerName: device.name,
       isSending: true,
-      bytesTransferred: sentBytes,
+      bytesTransferred: lastSentBytes,
       totalBytes: totalBytes,
       speedBytesPerSec: 0,
       remainingSeconds: 0,
       isFailed: true,
-      errorMessage: errorReason,
+      errorMessage: lastError,
     );
     return false;
   }
 
   Future<bool> sendChatToDevice(NetworkDevice device, String text) async {
-    final client = _createBoundClient(
-      device.ip,
-      timeout: const Duration(seconds: 4),
-    );
-    try {
-      final request = await client.postUrl(
-        Uri.parse('http://${device.ip}:${device.port}/chat'),
+    await getLocalIpAddress();
+    final attempts = _findMatchingLocalIp(device.ip) != null
+        ? [true, false]
+        : [false];
+
+    for (final bindSource in attempts) {
+      final client = _createBoundClient(
+        device.ip,
+        timeout: const Duration(seconds: 4),
+        useSourceBind: bindSource,
       );
-      request.headers.contentType = ContentType.json;
-      request.write(jsonEncode({'sender': deviceName, 'text': text}));
-      final response = await request.close();
-      return response.statusCode == 200;
-    } catch (_) {
-      return false;
-    } finally {
-      client.close(force: true);
+      try {
+        final request = await client.postUrl(
+          Uri.parse('http://${device.ip}:${device.port}/chat'),
+        );
+        request.headers.contentType = ContentType.json;
+        request.write(jsonEncode({'sender': deviceName, 'text': text}));
+        final response = await request.close();
+        if (response.statusCode == 200) return true;
+      } catch (_) {
+      } finally {
+        client.close(force: true);
+      }
     }
+    return false;
   }
 }
