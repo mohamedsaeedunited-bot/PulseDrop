@@ -1,7 +1,7 @@
 name: pulsedrop
-description: PulseDrop v5 Final - Ultra-Fast Local File Sharing with Live Progress, Auto-Discovery, Bluetooth & QR
+description: PulseDrop v5.2 - Local File Sharing with In-App Auto-Updater, Bi-Directional Hotspot/Wi-Fi, Bluetooth & QR
 publish_to: 'none'
-version: 5.0.0+5
+version: 5.2.0+7
 
 environment:
   sdk: '>=3.3.0 <4.0.0'

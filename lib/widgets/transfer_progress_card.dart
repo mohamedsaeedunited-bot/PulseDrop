@@ -121,7 +121,7 @@ class TransferProgressCard extends StatelessWidget {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
-                        color: Colors.white.withOpacity(0.9),
+                        color: Colors.white.withOpacity(0.92),
                         fontSize: 13,
                       ),
                     ),
@@ -154,7 +154,26 @@ class TransferProgressCard extends StatelessWidget {
               ],
             ],
           ),
-          const SizedBox(height: 14),
+          if (failed &&
+              transfer.errorMessage != null &&
+              transfer.errorMessage!.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              decoration: BoxDecoration(
+                color: Colors.black.withOpacity(0.2),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Text(
+                transfer.errorMessage!,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: Colors.white, fontSize: 11),
+              ),
+            ),
+          ],
+          const SizedBox(height: 12),
           ClipRRect(
             borderRadius: BorderRadius.circular(10),
             child: LinearProgressIndicator(
@@ -168,24 +187,30 @@ class TransferProgressCard extends StatelessWidget {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text(
-                '${_formatBytes(transfer.bytesTransferred)} / ${_formatBytes(transfer.totalBytes)}',
-                style: TextStyle(
-                  color: Colors.white.withOpacity(0.92),
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
+              Directionality(
+                textDirection: TextDirection.ltr,
+                child: Text(
+                  '${_formatBytes(transfer.bytesTransferred)} / ${_formatBytes(transfer.totalBytes)}',
+                  style: TextStyle(
+                    color: Colors.white.withOpacity(0.95),
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
               ),
               if (!done && !failed)
                 Row(
                   children: [
                     if (transfer.speedBytesPerSec > 0) ...[
-                      Text(
-                        _formatSpeed(transfer.speedBytesPerSec),
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 12,
-                          fontWeight: FontWeight.bold,
+                      Directionality(
+                        textDirection: TextDirection.ltr,
+                        child: Text(
+                          _formatSpeed(transfer.speedBytesPerSec),
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                          ),
                         ),
                       ),
                       const SizedBox(width: 8),

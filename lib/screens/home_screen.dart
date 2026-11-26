@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/device_model.dart';
 import '../services/bluetooth_service.dart';
 import '../services/network_service.dart';
+import '../services/update_service.dart';
 import '../widgets/transfer_progress_card.dart';
 import 'history_screen.dart';
 import 'web_share_sheet.dart';
@@ -26,19 +27,162 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   final NetworkService _networkService = NetworkService();
   final BluetoothDiscoveryService _btService = BluetoothDiscoveryService();
   final TextEditingController _chatController = TextEditingController();
 
   final List<TransferRecord> _history = [];
   final List<ChatMessage> _messages = [];
+  bool _checkingUpdate = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _loadSavedHistory();
     _initServices();
+    Future.delayed(const Duration(seconds: 2), () {
+      if (mounted) _checkUpdates(manual: false);
+    });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _networkService.ensureServicesAlive();
+    }
+  }
+
+  Future<void> _checkUpdates({required bool manual}) async {
+    if (_checkingUpdate) return;
+    _checkingUpdate = true;
+
+    if (manual && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('جاري التحقق من وجود تحديثات جديدة...'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+    }
+
+    final info = await AppUpdateService.checkForUpdate();
+    _checkingUpdate = false;
+    if (!mounted) return;
+
+    if (info.status == UpdateCheckStatus.updateAvailable) {
+      _showUpdateDialog(info);
+    } else if (manual) {
+      String msg;
+      if (info.status == UpdateCheckStatus.upToDate) {
+        msg = 'أنت تستخدم أحدث إصدار بالفعل (v${AppUpdateService.currentVersion}) ✅';
+      } else if (info.status == UpdateCheckStatus.repoPrivateOrNoRelease) {
+        msg = 'تعذر الوصول للتحديثات: تأكد أن مستودع PulseDrop مضبوط على Public وتم نشر Release.';
+      } else {
+        msg = 'تعذر الاتصال بخادم التحديثات، تأكد من وجود إنترنت.';
+      }
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+    }
+  }
+
+  void _showUpdateDialog(UpdateInfo info) {
+    bool isDownloading = false;
+    double progress = 0.0;
+    String statusText = '';
+    String? errorMsg;
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setDialogState) {
+            return AlertDialog(
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+              title: Row(
+                children: [
+                  const Icon(Icons.system_update_rounded, color: Color(0xFF0EA5E9)),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text('تحديث جديد متاح (v${info.latestVersion})'),
+                  ),
+                ],
+              ),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'إصدارك الحالي: v${AppUpdateService.currentVersion}',
+                    style: const TextStyle(fontSize: 12, color: Colors.grey),
+                  ),
+                  const SizedBox(height: 10),
+                  Text(info.releaseNotes, style: const TextStyle(height: 1.4)),
+                  if (isDownloading) ...[
+                    const SizedBox(height: 16),
+                    LinearProgressIndicator(value: progress > 0 ? progress : null),
+                    const SizedBox(height: 8),
+                    Text(
+                      statusText,
+                      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+                    ),
+                  ],
+                  if (errorMsg != null) ...[
+                    const SizedBox(height: 12),
+                    Text(
+                      errorMsg!,
+                      style: const TextStyle(color: Colors.red, fontSize: 12),
+                    ),
+                  ],
+                ],
+              ),
+              actions: [
+                if (!isDownloading)
+                  TextButton(
+                    onPressed: () => Navigator.pop(ctx),
+                    child: const Text('لاحقاً'),
+                  ),
+                if (!isDownloading)
+                  FilledButton.icon(
+                    onPressed: () async {
+                      setDialogState(() {
+                        isDownloading = true;
+                        errorMsg = null;
+                        statusText = 'جاري تجهيز التحميل...';
+                      });
+                      final err = await AppUpdateService.downloadAndInstall(
+                        info,
+                        onProgress: (pct, rec, total) {
+                          final mbRec = (rec / (1024 * 1024)).toStringAsFixed(1);
+                          final mbTot = total > 0
+                              ? (total / (1024 * 1024)).toStringAsFixed(1)
+                              : '?';
+                          setDialogState(() {
+                            progress = pct;
+                            statusText =
+                                'جاري التحميل: ${(pct * 100).round()}% ($mbRec / $mbTot MB)';
+                          });
+                        },
+                      );
+                      if (err != null) {
+                        setDialogState(() {
+                          isDownloading = false;
+                          errorMsg = err;
+                        });
+                      } else if (ctx.mounted) {
+                        Navigator.pop(ctx);
+                      }
+                    },
+                    icon: const Icon(Icons.download_rounded),
+                    label: const Text('تحديث الآن'),
+                  ),
+              ],
+            );
+          },
+        );
+      },
+    );
   }
 
   Future<void> _loadSavedHistory() async {
@@ -85,6 +229,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _networkService.stopServices();
     _btService.dispose();
     _chatController.dispose();
@@ -274,7 +419,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                                       dev.name,
                                                       style: const TextStyle(fontWeight: FontWeight.bold),
                                                     ),
-                                                    subtitle: Text(dev.ip),
+                                                    subtitle: Text('${dev.ip}:${dev.port}'),
                                                     trailing: FilledButton.icon(
                                                       onPressed: () {
                                                         Navigator.pop(ctx);
@@ -439,8 +584,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final ip = _networkService.localIp ?? 'جاري تحديد IP...';
-
     return Scaffold(
       appBar: AppBar(
         backgroundColor: Colors.transparent,
@@ -466,9 +609,9 @@ class _HomeScreenState extends State<HomeScreen> {
                   style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
                 ),
                 Text(
-                  _networkService.isVisible ? 'الرادار نشط' : 'وضع التخفي',
+                  '${_networkService.isVisible ? "الرادار نشط" : "وضع التخفي"} • v${AppUpdateService.currentVersion}',
                   style: TextStyle(
-                    fontSize: 12,
+                    fontSize: 11,
                     color: _networkService.isVisible ? Colors.teal : Colors.grey,
                   ),
                 ),
@@ -477,6 +620,11 @@ class _HomeScreenState extends State<HomeScreen> {
           ],
         ),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.system_update_rounded),
+            tooltip: 'التحقق من التحديثات',
+            onPressed: () => _checkUpdates(manual: true),
+          ),
           IconButton(
             icon: const Icon(Icons.edit_outlined),
             tooltip: 'تغيير اسم الجهاز',
@@ -617,9 +765,17 @@ class _HomeScreenState extends State<HomeScreen> {
                         ],
                       ),
                     ),
-                    Text(
-                      ip,
-                      style: const TextStyle(color: Colors.grey, fontSize: 13),
+                    ValueListenableBuilder<String?>(
+                      valueListenable: _networkService.localIpNotifier,
+                      builder: (context, ipVal, _) {
+                        return Directionality(
+                          textDirection: TextDirection.ltr,
+                          child: Text(
+                            ipVal ?? 'جاري تحديد IP...',
+                            style: const TextStyle(color: Colors.grey, fontSize: 13),
+                          ),
+                        );
+                      },
                     ),
                     const SizedBox(height: 14),
                     ValueListenableBuilder<List<NetworkDevice>>(

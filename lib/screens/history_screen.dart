@@ -330,11 +330,14 @@ class _HistoryScreenState extends State<HistoryScreen> {
                                               ),
                                             ),
                                             const SizedBox(width: 8),
-                                            Text(
-                                              _formatSize(rec.sizeBytes),
-                                              style: const TextStyle(
-                                                fontSize: 12,
-                                                color: Colors.grey,
+                                            Directionality(
+                                              textDirection: TextDirection.ltr,
+                                              child: Text(
+                                                _formatSize(rec.sizeBytes),
+                                                style: const TextStyle(
+                                                  fontSize: 12,
+                                                  color: Colors.grey,
+                                                ),
                                               ),
                                             ),
                                           ],

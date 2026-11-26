@@ -49,7 +49,7 @@ class _WebShareSheetState extends State<WebShareSheet> {
   @override
   Widget build(BuildContext context) {
     final ip = widget.networkService.localIp ?? 'غير متصل بالواي فاي';
-    final webUrl = 'http://$ip:${NetworkService.serverPort}';
+    final webUrl = 'http://$ip:${widget.networkService.activePort}';
 
     return SafeArea(
       top: false,
@@ -121,12 +121,15 @@ class _WebShareSheetState extends State<WebShareSheet> {
             ),
           ),
           const SizedBox(height: 14),
-          SelectableText(
-            webUrl,
-            style: const TextStyle(
-              fontSize: 16,
-              fontWeight: FontWeight.bold,
-              color: Color(0xFF0284C7),
+          Directionality(
+            textDirection: TextDirection.ltr,
+            child: SelectableText(
+              webUrl,
+              style: const TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+                color: Color(0xFF0284C7),
+              ),
             ),
           ),
           const SizedBox(height: 6),
@@ -174,15 +177,18 @@ class _WebShareSheetState extends State<WebShareSheet> {
         const Padding(
           padding: EdgeInsets.symmetric(horizontal: 20),
           child: Text(
-            '1. افتح نقطة الاتصال (Hotspot) من موبايلك.\n2. وصّل الموبايل الآخر عليها.\n3. اضغط "إرسال" وسيظهر الموبايل تلقائياً خلال ثانية واحدة بدون سحب من الباقة.',
+            '1. افتح نقطة الاتصال (Hotspot) من موبايلك.\n2. وصّل الموبايل الآخر عليها.\n3. اضغط "إرسال" وسيظهر الموبايل تلقائياً وتبعت وتستلم في الاتجاهين بسرعة فائقة.',
             textAlign: TextAlign.center,
             style: TextStyle(color: Colors.grey, height: 1.5),
           ),
         ),
         const SizedBox(height: 16),
-        Text(
-          'عنوان جهازك الحالي: $webUrl',
-          style: const TextStyle(fontWeight: FontWeight.w600),
+        Directionality(
+          textDirection: TextDirection.ltr,
+          child: Text(
+            webUrl,
+            style: const TextStyle(fontWeight: FontWeight.w600),
+          ),
         ),
       ],
     );

@@ -9,7 +9,7 @@ class NetworkDevice {
     required this.name,
     required this.ip,
     this.port = 8080,
-    this.version = '5.0',
+    this.version = '5.2',
     DateTime? lastSeen,
   }) : lastSeen = lastSeen ?? DateTime.now();
 
@@ -51,6 +51,7 @@ class TransferProgress {
   final int remainingSeconds;
   final bool isCompleted;
   final bool isFailed;
+  final String? errorMessage;
 
   TransferProgress({
     required this.fileName,
@@ -63,6 +64,7 @@ class TransferProgress {
     required this.remainingSeconds,
     this.isCompleted = false,
     this.isFailed = false,
+    this.errorMessage,
   });
 
   double get progress {
